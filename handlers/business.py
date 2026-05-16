@@ -172,26 +172,16 @@ async def handle_business_message(message: Message, bot: Bot):
         owner_id, chat_id, note, history, message.text, active_model
     ))
 
-    parts = [p.strip() for p in reply.split("|||") if p.strip()]
-    for i, part in enumerate(parts):
-        if i > 0:
-            await asyncio.sleep(0.8)
-            try:
-                await bot.send_chat_action(
-                    chat_id=chat_id,
-                    action="typing",
-                    business_connection_id=message.business_connection_id,
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
-        await bot.send_message(
-            chat_id=chat_id,
-            text=part,
-            business_connection_id=message.business_connection_id,
-        )
+    # Убираем разделители если LLM вдруг их вставила
+    clean_reply = reply.replace("|||", " ").strip()
 
-    logger.info(f"[SENT] owner_id={owner_id} chat_id={chat_id} parts={len(parts)}")
+    await bot.send_message(
+        chat_id=chat_id,
+        text=clean_reply,
+        business_connection_id=message.business_connection_id,
+    )
+
+    logger.info(f"[SENT] owner_id={owner_id} chat_id={chat_id}")
 
 
 async def _get_owner_id(message: Message, bot: Bot) -> int | None:
