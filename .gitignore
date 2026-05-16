@@ -1,0 +1,8 @@
+.env
+venv/
+*.db
+__pycache__/
+*.pyc
+.DS_Store
+screen.log
+bot.log
