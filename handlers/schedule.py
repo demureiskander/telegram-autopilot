@@ -22,7 +22,8 @@ router = Router()
 class ScheduleFSM(StatesGroup):
     waiting_chat   = State()  # выбор получателя из списка
     waiting_time   = State()  # ввод времени
-    waiting_text   = State()  # ввод текста сообщения
+    waiting_text   = State()  # ввод инструкции
+    waiting_edit   = State()  # ручное редактирование
     confirm        = State()  # подтверждение
 
 
@@ -95,6 +96,45 @@ async def _parse_time(time_input: str, user_tz: str) -> datetime | None:
 
     except Exception as e:
         logger.error(f"[SCHEDULER] time parse error: {e}")
+        return None
+
+
+async def _compose_message(instruction: str, user_prompt: str) -> str | None:
+    """LLM формулирует сообщение на основе инструкции пользователя."""
+    try:
+        from config import LLM_API_KEY, LLM_BASE_URL
+        import aiohttp
+
+        prompt = (
+            f"Ты помогаешь пользователю составить сообщение которое он хочет отправить кому-то.\n\n"
+            f"Контекст о пользователе (как он обычно общается):\n{user_prompt}\n\n"
+            f"Инструкция пользователя: \"{instruction}\"\n\n"
+            f"Составь одно готовое сообщение которое пользователь отправит получателю.\n"
+            f"Сообщение должно звучать естественно, в стиле пользователя.\n"
+            f"Верни ТОЛЬКО текст сообщения, без пояснений и кавычек."
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                LLM_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gemini-2.5-flash-lite",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 300,
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"[SCHEDULER] compose error: {e}")
         return None
 
 
@@ -210,27 +250,80 @@ async def on_schedule_time(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Время: <b>{local_str}</b> (ваш часовой пояс)\n\n"
         "💬 <b>Что написать?</b>\n\n"
-        "Введите текст сообщения:",
+        "Опишите что хотите сказать — ИИ сам сформулирует сообщение и покажет вам на проверку.\n\n"
+        "<i>Например: спроси как дела и напомни про встречу завтра</i>",
     )
 
 
-# ── Ввод текста ───────────────────────────────────────────────────────────────
+# ── Ввод инструкции / текста ─────────────────────────────────────────────────
 
 @router.message(ScheduleFSM.waiting_text)
 async def on_schedule_text(message: Message, state: FSMContext):
-    await state.update_data(text=message.text.strip())
+    instruction = message.text.strip()
+    await state.update_data(instruction=instruction)
+
+    user = await get_user(message.from_user.id)
+    user_prompt = user.get("system_prompt", "") if user else ""
+
+    await message.answer("✍️ Формулирую сообщение...")
+
+    composed = await _compose_message(instruction, user_prompt)
+
+    if not composed:
+        # Если LLM не смогла — используем инструкцию как есть
+        composed = instruction
+        await message.answer(
+            "⚠️ Не удалось сформулировать автоматически — использую ваш текст как есть."
+        )
+
+    await state.update_data(text=composed)
     data = await state.get_data()
     await state.set_state(ScheduleFSM.confirm)
 
     await message.answer(
-        "📋 <b>Проверьте:</b>\n\n"
+        "📋 <b>Проверьте сообщение:</b>\n\n"
         f"👤 Кому: <b>{data['chat_name']}</b>\n"
-        f"🕐 Когда: <b>{data['send_at_local']}</b>\n"
-        f"💬 Текст: <i>{data['text']}</i>\n\n"
-        "Всё верно?",
+        f"🕐 Когда: <b>{data['send_at_local']}</b>\n\n"
+        f"💬 <b>Текст:</b>\n<i>{composed}</i>\n\n"
+        "Всё верно или хотите изменить?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Запланировать", callback_data="sched:confirm")],
-            [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="sched:edit_text")],
+            [InlineKeyboardButton(text="🔄 Переформулировать", callback_data="sched:recompose")],
+            [InlineKeyboardButton(text="✏️ Написать вручную", callback_data="sched:edit_text")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:schedule")],
+        ])
+    )
+
+
+@router.callback_query(F.data == "sched:recompose", ScheduleFSM.confirm)
+async def on_recompose(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    instruction = data.get("instruction", "")
+
+    user = await get_user(callback.from_user.id)
+    user_prompt = user.get("system_prompt", "") if user else ""
+
+    await callback.message.answer("✍️ Переформулирую...")
+
+    composed = await _compose_message(instruction, user_prompt)
+    if not composed:
+        await callback.answer("Не удалось переформулировать", show_alert=True)
+        return
+
+    await state.update_data(text=composed)
+    data = await state.get_data()
+
+    await callback.message.answer(
+        "📋 <b>Новый вариант:</b>\n\n"
+        f"👤 Кому: <b>{data['chat_name']}</b>\n"
+        f"🕐 Когда: <b>{data['send_at_local']}</b>\n\n"
+        f"💬 <b>Текст:</b>\n<i>{composed}</i>\n\n"
+        "Подходит?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Запланировать", callback_data="sched:confirm")],
+            [InlineKeyboardButton(text="🔄 Ещё раз", callback_data="sched:recompose")],
+            [InlineKeyboardButton(text="✏️ Написать вручную", callback_data="sched:edit_text")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:schedule")],
         ])
     )
@@ -239,8 +332,32 @@ async def on_schedule_text(message: Message, state: FSMContext):
 @router.callback_query(F.data == "sched:edit_text", ScheduleFSM.confirm)
 async def on_edit_text(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await state.set_state(ScheduleFSM.waiting_text)
-    await callback.message.answer("💬 Введите новый текст сообщения:")
+    await state.set_state(ScheduleFSM.waiting_edit)
+    data = await state.get_data()
+    await callback.message.answer(
+        f"✏️ Напишите текст сообщения вручную:\n\n"
+        f"<i>Текущий вариант: {data.get('text', '')}</i>"
+    )
+
+
+@router.message(ScheduleFSM.waiting_edit)
+async def on_manual_edit(message: Message, state: FSMContext):
+    await state.update_data(text=message.text.strip())
+    data = await state.get_data()
+    await state.set_state(ScheduleFSM.confirm)
+
+    await message.answer(
+        "📋 <b>Проверьте:</b>\n\n"
+        f"👤 Кому: <b>{data['chat_name']}</b>\n"
+        f"🕐 Когда: <b>{data['send_at_local']}</b>\n\n"
+        f"💬 <b>Текст:</b>\n<i>{data['text']}</i>\n\n"
+        "Всё верно?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Запланировать", callback_data="sched:confirm")],
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data="sched:edit_text")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:schedule")],
+        ])
+    )
 
 
 # ── Подтверждение ─────────────────────────────────────────────────────────────
