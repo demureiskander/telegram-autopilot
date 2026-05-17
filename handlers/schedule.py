@@ -14,15 +14,16 @@ from database.db import (
     get_user, get_chat_list, add_scheduled_message,
     get_user_scheduled, cancel_scheduled,
 )
-from services.llm import ask_llm
 from logger import logger
 
 router = Router()
 
 
 class ScheduleFSM(StatesGroup):
-    waiting_input = State()  # пользователь описывает задачу свободным текстом
-    confirm       = State()  # подтверждение перед сохранением
+    waiting_chat   = State()  # выбор получателя из списка
+    waiting_time   = State()  # ввод времени
+    waiting_text   = State()  # ввод текста сообщения
+    confirm        = State()  # подтверждение
 
 
 async def safe_edit(callback: CallbackQuery, text: str, reply_markup=None):
@@ -41,56 +42,42 @@ def kb_schedule_menu() -> InlineKeyboardMarkup:
     ])
 
 
-async def _parse_schedule_request(
-    user_input: str,
-    user_tz: str,
-    chat_list: list,
-) -> dict | None:
+async def _parse_time(time_input: str, user_tz: str) -> datetime | None:
     """
-    LLM парсит свободный текст и возвращает структурированные данные.
-    Возвращает dict с ключами: chat_id, chat_name, text, send_at_utc, send_at_local
-    Или None если не удалось распарсить.
+    Парсит время через LLM — понимает 'завтра в 19:00', 'через 2 часа', '15 мая в 10 утра' и т.д.
+    Возвращает datetime в UTC или None.
     """
-    now_local = datetime.now(pytz.timezone(user_tz))
-    now_str = now_local.strftime("%Y-%m-%d %H:%M (%A)")
-
-    chats_text = ""
-    if chat_list:
-        chats_text = "Известные чаты пользователя:\n"
-        for row in chat_list[:20]:
-            chat_id, name = row[0], row[1]
-            chats_text += f"- {name or 'без имени'} (chat_id: {chat_id})\n"
-
-    prompt = (
-        f"Сейчас: {now_str} (часовой пояс пользователя: {user_tz})\n\n"
-        f"{chats_text}\n"
-        f"Пользователь хочет запланировать отправку сообщения:\n"
-        f"\"{user_input}\"\n\n"
-        "Извлеки:\n"
-        "1. chat_id — числовой ID чата из списка выше (если имя совпадает)\n"
-        "2. chat_name — имя получателя как написал пользователь\n"
-        "3. text — текст сообщения для отправки\n"
-        "4. send_at_local — дата и время отправки в формате YYYY-MM-DD HH:MM\n"
-        "   (в часовом поясе пользователя, учитывая 'сегодня', 'завтра', 'через час' и т.д.)\n\n"
-        "Ответь СТРОГО в формате JSON без пояснений:\n"
-        "{\"chat_id\": 123456, \"chat_name\": \"Имя\", \"text\": \"текст\", \"send_at_local\": \"2026-05-17 19:00\"}\n\n"
-        "Если не можешь определить получателя или время — верни: {\"error\": \"причина\"}"
-    )
-
     try:
         from config import LLM_API_KEY, LLM_BASE_URL
         import aiohttp
         import json
 
+        tz = pytz.timezone(user_tz)
+        now_local = datetime.now(tz)
+        now_str = now_local.strftime("%Y-%m-%d %H:%M (%A, %d %B %Y)")
+
+        prompt = (
+            f"Сейчас: {now_str} (часовой пояс: {user_tz})\n\n"
+            f"Пользователь хочет отправить сообщение: \"{time_input}\"\n\n"
+            "Определи дату и время отправки в формате YYYY-MM-DD HH:MM.\n"
+            "Учитывай: 'завтра', 'послезавтра', 'через N часов/минут', "
+            "'в пятницу', 'на следующей неделе', 'утром' (9:00), 'вечером' (19:00) и т.д.\n\n"
+            "Ответь СТРОГО одной строкой в формате: YYYY-MM-DD HH:MM\n"
+            "Если не можешь определить — ответь: ERROR"
+        )
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 LLM_BASE_URL,
-                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json"
+                },
                 json={
                     "model": "gemini-2.5-flash-lite",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 200,
+                    "max_tokens": 30,
                 },
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -98,147 +85,190 @@ async def _parse_schedule_request(
                     return None
                 data = await resp.json()
                 raw = data["choices"][0]["message"]["content"].strip()
-                raw = raw.replace("```json", "").replace("```", "").strip()
-                parsed = json.loads(raw)
 
-                if "error" in parsed:
-                    return {"error": parsed["error"]}
+                if "ERROR" in raw or not raw:
+                    return None
 
-                # Конвертируем время в UTC
-                tz = pytz.timezone(user_tz)
-                local_dt = tz.localize(
-                    datetime.strptime(parsed["send_at_local"], "%Y-%m-%d %H:%M")
-                )
+                local_dt = tz.localize(datetime.strptime(raw[:16], "%Y-%m-%d %H:%M"))
                 utc_dt = local_dt.astimezone(pytz.utc)
+                return utc_dt
 
-                return {
-                    "chat_id": parsed.get("chat_id"),
-                    "chat_name": parsed.get("chat_name", "?"),
-                    "text": parsed.get("text", ""),
-                    "send_at_utc": utc_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "send_at_local": parsed["send_at_local"],
-                }
     except Exception as e:
-        logger.error(f"[SCHEDULER] parse error: {e}")
+        logger.error(f"[SCHEDULER] time parse error: {e}")
         return None
 
 
-# ── Кнопка в админ панели ─────────────────────────────────────────────────────
+# ── Меню планировщика ─────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:schedule")
 async def on_schedule_menu(callback: CallbackQuery):
     await callback.answer()
     await safe_edit(callback,
         "📅 <b>Планировщик сообщений</b>\n\n"
-        "Запланируйте отправку сообщения в нужное время — бот отправит его автоматически.",
+        "Запланируйте отправку сообщения — бот отправит его автоматически в нужное время.",
         reply_markup=kb_schedule_menu()
     )
 
 
-# ── Новое запланированное сообщение ───────────────────────────────────────────
+# ── Новое сообщение — выбор получателя ───────────────────────────────────────
 
 @router.callback_query(F.data == "sched:new")
 async def on_schedule_new(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await state.set_state(ScheduleFSM.waiting_input)
-    await callback.message.answer(
-        "✏️ <b>Новое запланированное сообщение</b>\n\n"
-        "Напишите свободным текстом что, кому и когда отправить.\n\n"
-        "<i>Примеры:\n"
-        "— Напиши Рауле завтра в 19:00: привет, как дела?\n"
-        "— Отправь маме через 2 часа: не забудь позвонить врачу\n"
-        "— Напомни Артёму в пятницу в 10 утра про встречу</i>\n\n"
-        "Отмена → /admin"
+    user_id = callback.from_user.id
+    chats = await get_chat_list(user_id, limit=20)
+
+    if not chats:
+        await safe_edit(callback,
+            "📅 <b>Планировщик</b>\n\n"
+            "У вас пока нет чатов — планировщик работает только с людьми "
+            "которые уже писали вам через этого бота.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:schedule")]
+            ])
+        )
+        return
+
+    buttons = []
+    for row in chats:
+        chat_id, name, msg_count = row[0], row[1], row[2]
+        display = name or f"Чат {chat_id}"
+        buttons.append([InlineKeyboardButton(
+            text=f"💬 {display}",
+            callback_data=f"sched:chat:{chat_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:schedule")])
+
+    await safe_edit(callback,
+        "📅 <b>Кому отправить?</b>\n\n"
+        "Выберите получателя из списка:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await state.set_state(ScheduleFSM.waiting_chat)
+
+
+@router.callback_query(F.data.startswith("sched:chat:"), ScheduleFSM.waiting_chat)
+async def on_schedule_chat_selected(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    chat_id = int(callback.data.split(":")[2])
+
+    # Получаем имя из списка
+    user_id = callback.from_user.id
+    chats = await get_chat_list(user_id, limit=20)
+    chat_name = str(chat_id)
+    for row in chats:
+        if row[0] == chat_id:
+            chat_name = row[1] or str(chat_id)
+            break
+
+    await state.update_data(chat_id=chat_id, chat_name=chat_name)
+    await state.set_state(ScheduleFSM.waiting_time)
+
+    await safe_edit(callback,
+        f"📅 Получатель: <b>{chat_name}</b>\n\n"
+        "🕐 <b>Когда отправить?</b>\n\n"
+        "Напишите время в любом удобном формате:\n\n"
+        "<i>— завтра в 19:00\n"
+        "— через 2 часа\n"
+        "— в пятницу в 10 утра\n"
+        "— 25 мая в 15:30</i>",
     )
 
 
-@router.message(ScheduleFSM.waiting_input)
-async def on_schedule_input(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    if not user:
-        return
+# ── Ввод времени ──────────────────────────────────────────────────────────────
 
-    user_tz = user.get("timezone") or "UTC"
-    chat_list = await get_chat_list(user_id, limit=20)
+@router.message(ScheduleFSM.waiting_time)
+async def on_schedule_time(message: Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    user_tz = user.get("timezone") or "UTC" if user else "UTC"
 
-    await message.answer("⏳ Разбираю запрос...")
+    await message.answer("⏳ Определяю время...")
 
-    result = await _parse_schedule_request(message.text, user_tz, chat_list)
+    utc_dt = await _parse_time(message.text, user_tz)
 
-    if not result:
+    if not utc_dt:
         await message.answer(
-            "Не удалось разобрать запрос 🤔\n\n"
-            "Попробуйте написать точнее, например:\n"
-            "<i>Напиши Рауле завтра в 19:00: привет!</i>\n\n"
-            "Или отмените → /admin"
+            "Не удалось определить время 🤔\n\n"
+            "Попробуйте написать точнее:\n"
+            "<i>— завтра в 19:00\n"
+            "— через 2 часа\n"
+            "— в пятницу в 10 утра</i>"
         )
         return
 
-    if "error" in result:
-        await message.answer(
-            f"Не смог разобрать: {result['error']}\n\n"
-            "Попробуйте ещё раз или отмените → /admin"
-        )
-        return
+    # Показываем время в часовом поясе пользователя для подтверждения
+    tz = pytz.timezone(user_tz)
+    local_dt = utc_dt.astimezone(tz)
+    local_str = local_dt.strftime("%d.%m.%Y в %H:%M")
 
     await state.update_data(
-        result=result,
-        business_connection_id=message.business_connection_id or "",
+        send_at_utc=utc_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        send_at_local=local_str,
     )
-    await state.set_state(ScheduleFSM.confirm)
-
-    chat_name = result["chat_name"]
-    text = result["text"]
-    send_at = result["send_at_local"]
+    await state.set_state(ScheduleFSM.waiting_text)
 
     await message.answer(
-        f"📋 <b>Проверьте запланированное сообщение:</b>\n\n"
-        f"👤 Кому: <b>{chat_name}</b>\n"
-        f"🕐 Когда: <b>{send_at}</b> (ваше время)\n"
-        f"💬 Текст: <i>{text}</i>\n\n"
+        f"✅ Время: <b>{local_str}</b> (ваш часовой пояс)\n\n"
+        "💬 <b>Что написать?</b>\n\n"
+        "Введите текст сообщения:",
+    )
+
+
+# ── Ввод текста ───────────────────────────────────────────────────────────────
+
+@router.message(ScheduleFSM.waiting_text)
+async def on_schedule_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text.strip())
+    data = await state.get_data()
+    await state.set_state(ScheduleFSM.confirm)
+
+    await message.answer(
+        "📋 <b>Проверьте:</b>\n\n"
+        f"👤 Кому: <b>{data['chat_name']}</b>\n"
+        f"🕐 Когда: <b>{data['send_at_local']}</b>\n"
+        f"💬 Текст: <i>{data['text']}</i>\n\n"
         "Всё верно?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Запланировать", callback_data="sched:confirm")],
-            [InlineKeyboardButton(text="✏️ Изменить", callback_data="sched:new")],
+            [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="sched:edit_text")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:schedule")],
         ])
     )
 
 
+@router.callback_query(F.data == "sched:edit_text", ScheduleFSM.confirm)
+async def on_edit_text(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(ScheduleFSM.waiting_text)
+    await callback.message.answer("💬 Введите новый текст сообщения:")
+
+
+# ── Подтверждение ─────────────────────────────────────────────────────────────
+
 @router.callback_query(F.data == "sched:confirm", ScheduleFSM.confirm)
 async def on_schedule_confirm(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await state.get_data()
-    result = data.get("result")
-    business_connection_id = data.get("business_connection_id", "")
-
-    if not result or not result.get("chat_id"):
-        await callback.answer(
-            "Не удалось определить получателя. Попробуйте ещё раз.",
-            show_alert=True
-        )
-        await state.clear()
-        return
+    user_id = callback.from_user.id
 
     msg_id = await add_scheduled_message(
-        owner_id=callback.from_user.id,
-        chat_id=result["chat_id"],
-        text=result["text"],
-        send_at_utc=result["send_at_utc"],
-        business_connection_id=business_connection_id,
+        owner_id=user_id,
+        chat_id=data["chat_id"],
+        text=data["text"],
+        send_at_utc=data["send_at_utc"],
+        business_connection_id="",
     )
 
     await state.clear()
     logger.info(
         f"[SCHEDULER] scheduled msg_id={msg_id} "
-        f"owner_id={callback.from_user.id} "
-        f"send_at={result['send_at_utc']}"
+        f"owner_id={user_id} chat_id={data['chat_id']} "
+        f"send_at={data['send_at_utc']}"
     )
 
     await safe_edit(callback,
         f"✅ <b>Запланировано!</b>\n\n"
-        f"Сообщение будет отправлено <b>{result['send_at_local']}</b> по вашему времени.",
+        f"Сообщение будет отправлено <b>{data['send_at_local']}</b>.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Мои запланированные", callback_data="sched:list")],
             [InlineKeyboardButton(text="◀️ В панель", callback_data="adm:menu")],
@@ -261,7 +291,7 @@ async def on_schedule_list(callback: CallbackQuery):
     if not scheduled:
         await safe_edit(callback,
             "📋 <b>Запланированные сообщения</b>\n\n"
-            "У вас нет запланированных сообщений.",
+            "Нет запланированных сообщений.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✏️ Запланировать", callback_data="sched:new")],
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:schedule")],
@@ -279,7 +309,7 @@ async def on_schedule_list(callback: CallbackQuery):
         except Exception:
             time_str = send_at[:16]
 
-        short_text = text[:30] + "…" if len(text) > 30 else text
+        short_text = text[:35] + "…" if len(text) > 35 else text
         lines.append(f"🕐 <b>{time_str}</b> — {short_text}")
         buttons.append([InlineKeyboardButton(
             text=f"❌ Отменить · {time_str}",
@@ -305,6 +335,5 @@ async def on_schedule_cancel(callback: CallbackQuery):
     else:
         await callback.answer("❌ Не удалось отменить", show_alert=True)
 
-    # Обновляем список
     callback.data = "sched:list"
     await on_schedule_list(callback)
