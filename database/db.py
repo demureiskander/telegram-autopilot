@@ -333,7 +333,7 @@ async def get_chat_list(user_id: int, limit: int = 100) -> list:
                    (SELECT content FROM messages
                     WHERE user_id = c.user_id AND chat_id = c.chat_id
                     AND role = 'user' ORDER BY created_at DESC LIMIT 1) as last_msg,
-                   (SELECT note FROM contact_notes
+                   (SELECT user_note FROM contact_notes
                     WHERE user_id = c.user_id AND chat_id = c.chat_id) as note
             FROM chats c WHERE c.user_id = ?
             ORDER BY c.last_active DESC LIMIT ?
