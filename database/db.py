@@ -128,6 +128,9 @@ async def init_db() -> None:
             "ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'",
             "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN is_connected INTEGER DEFAULT 0",
+            "ALTER TABLE contact_notes ADD COLUMN user_note TEXT DEFAULT ''",
+            "ALTER TABLE contact_notes ADD COLUMN ai_note TEXT DEFAULT ''",
+            "ALTER TABLE contact_notes ADD COLUMN note TEXT DEFAULT ''",
         ]:
             try:
                 await db.execute(migration)
