@@ -21,6 +21,7 @@ router = Router()
 
 class ScheduleFSM(StatesGroup):
     waiting_chat   = State()  # выбор получателя из списка
+    waiting_manual = State()  # ввод username или ID вручную
     waiting_time   = State()  # ввод времени
     waiting_text   = State()  # ввод инструкции
     waiting_edit   = State()  # ручное редактирование
@@ -158,33 +159,82 @@ async def on_schedule_new(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     chats = await get_chat_list(user_id, limit=20)
 
-    if not chats:
-        await safe_edit(callback,
-            "📅 <b>Планировщик</b>\n\n"
-            "У вас пока нет чатов — планировщик работает только с людьми "
-            "которые уже писали вам через этого бота.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:schedule")]
-            ])
-        )
-        return
-
     buttons = []
-    for row in chats:
-        chat_id, name, msg_count = row[0], row[1], row[2]
-        display = name or f"Чат {chat_id}"
-        buttons.append([InlineKeyboardButton(
-            text=f"💬 {display}",
-            callback_data=f"sched:chat:{chat_id}"
-        )])
+    if chats:
+        for row in chats:
+            chat_id, name, msg_count = row[0], row[1], row[2]
+            display = name or f"Чат {chat_id}"
+            buttons.append([InlineKeyboardButton(
+                text=f"💬 {display}",
+                callback_data=f"sched:chat:{chat_id}"
+            )])
+
+    # Всегда показываем кнопку ввода вручную
+    buttons.append([InlineKeyboardButton(
+        text="✏️ Ввести Username или ID",
+        callback_data="sched:manual_input"
+    )])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:schedule")])
 
-    await safe_edit(callback,
-        "📅 <b>Кому отправить?</b>\n\n"
-        "Выберите получателя из списка:",
+    header = "📅 <b>Кому отправить?</b>\n\nВыберите получателя из списка:"
+    if not chats:
+        header = (
+            "📅 <b>Кому отправить?</b>\n\n"
+            "История чатов пока пуста — введите Username или ID получателя вручную."
+        )
+
+    await safe_edit(callback, header,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await state.set_state(ScheduleFSM.waiting_chat)
+
+
+@router.callback_query(F.data == "sched:manual_input")
+async def on_manual_input(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(ScheduleFSM.waiting_manual)
+    await callback.message.answer(
+        "✏️ <b>Введите Username или ID получателя</b>\n\n"
+        "Варианты:\n"
+        "— Username: <code>@username</code>\n"
+        "— Числовой ID: <code>123456789</code>\n\n"
+        "<i>Получить ID можно через @userinfobot</i>\n\n"
+        "Отмена → /admin"
+    )
+
+
+@router.message(ScheduleFSM.waiting_manual)
+async def on_manual_recipient(message: Message, state: FSMContext):
+    text = message.text.strip()
+
+    # Определяем chat_id и имя
+    if text.startswith("@"):
+        # Username — сохраняем как есть, Telegram сам разрешит
+        chat_id_or_username = text
+        chat_name = text
+    elif text.lstrip("-").isdigit():
+        # Числовой ID
+        chat_id_or_username = int(text)
+        chat_name = f"ID {text}"
+    else:
+        await message.answer(
+            "❌ Не распознал формат.\n\n"
+            "Введите <code>@username</code> или числовой ID вроде <code>123456789</code>:"
+        )
+        return
+
+    await state.update_data(chat_id=chat_id_or_username, chat_name=chat_name)
+    await state.set_state(ScheduleFSM.waiting_time)
+
+    await message.answer(
+        f"✅ Получатель: <b>{chat_name}</b>\n\n"
+        "🕐 <b>Когда отправить?</b>\n\n"
+        "Напишите время в любом удобном формате:\n\n"
+        "<i>— завтра в 19:00\n"
+        "— через 2 часа\n"
+        "— в пятницу в 10 утра\n"
+        "— 25 мая в 15:30</i>",
+    )
 
 
 @router.callback_query(F.data.startswith("sched:chat:"), ScheduleFSM.waiting_chat)
