@@ -1,3 +1,5 @@
+<img width="1915" height="530" alt="Frame 188" src="https://github.com/user-attachments/assets/d8cfb41f-5040-4694-8b48-367c26354b6e" />
+
 # 🤖 telegram-autopilot — cloud
 
 🇷🇺 Русский · 🇬🇧 [English](README.en.md)
