@@ -19,9 +19,20 @@ async def _send_scheduled(bot: Bot) -> None:
 
     for msg_id, owner_id, chat_id, text, business_connection_id in pending:
         try:
+            logger.info(
+                f"[SCHEDULER] attempting msg_id={msg_id} "
+                f"owner_id={owner_id} chat_id={chat_id} "
+                f"biz_conn_id='{business_connection_id or 'EMPTY'}'"
+            )
+
             kwargs = {"chat_id": chat_id, "text": text}
             if business_connection_id:
                 kwargs["business_connection_id"] = business_connection_id
+            else:
+                logger.warning(
+                    f"[SCHEDULER] ⚠️ msg_id={msg_id} has no business_connection_id — "
+                    f"message will be sent as bot DM, not through user profile"
+                )
 
             await bot.send_message(**kwargs)
             await mark_scheduled_sent(msg_id)
@@ -35,7 +46,7 @@ async def _send_scheduled(bot: Bot) -> None:
             logger.error(
                 f"[SCHEDULER] ❌ failed msg_id={msg_id} "
                 f"owner_id={owner_id} chat_id={chat_id} "
-                f"error={e}"
+                f"error={type(e).__name__}: {e}"
             )
 
 
