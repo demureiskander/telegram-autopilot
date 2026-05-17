@@ -208,16 +208,18 @@ async def on_users(callback: CallbackQuery):
         await safe_edit(callback, "Нет пользователей.", reply_markup=kb_back())
         return
 
-    lines = []
+    buttons = []
     for u in users:
         user_id, username, first_name, plan, is_enabled, is_connected, trial_at, sub_until, created = u
         name = f"@{username}" if username else first_name or str(user_id)
         status = "✅" if is_enabled else "⏸"
         conn = "🔌" if is_connected else "❌"
         plan_icon = "🏢" if plan == "business" else "👤"
-        lines.append(f"{status}{conn}{plan_icon} {name} <code>{user_id}</code>")
+        buttons.append([InlineKeyboardButton(
+            text=f"{status}{conn}{plan_icon} {name}",
+            callback_data=f"ow:user:{user_id}:{page}"
+        )])
 
-    buttons = []
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"ow:users:{page-1}"))
@@ -228,9 +230,8 @@ async def on_users(callback: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="ow:menu")])
 
     await safe_edit(callback,
-        f"👥 <b>Пользователи</b> · стр. {page + 1}\n\n"
-        + "\n".join(lines) + "\n\n"
-        "<i>Для бана: /banuser ID\nДля разбана: /unbanuser ID\nДля удаления: /deleteuser ID</i>",
+        f"👥 <b>Пользователи</b> · стр. {page + 1}\n"
+        f"<i>Нажмите на пользователя для управления</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
@@ -357,3 +358,117 @@ async def cmd_milestone(message: Message):
     s = await get_owner_stats()
     total = s["total_users"]
     await message.answer(f"Всего пользователей: <b>{total}</b>")
+
+
+@router.callback_query(F.data.startswith("ow:user:"), F.from_user.id == OWNER_ID)
+async def on_user_detail(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3] if len(parts) > 3 else "0"
+
+    from database.db import get_user
+    user = await get_user(target_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    name = f"@{user['username']}" if user.get('username') else user.get('first_name') or str(target_id)
+    plan = user.get('plan', 'personal')
+    is_enabled = bool(user.get('is_enabled'))
+    is_connected = bool(user.get('is_connected'))
+    is_banned = bool(user.get('is_banned'))
+    sub_until = user.get('subscription_until', '')
+    trial_at = user.get('trial_started_at', '')
+    created = user.get('created_at', '')[:10] if user.get('created_at') else '—'
+
+    status_lines = (
+        f"{'✅' if is_enabled else '⏸'} Автоответ: {'вкл' if is_enabled else 'выкл'}\n"
+        f"{'🔌' if is_connected else '❌'} Профиль: {'подключён' if is_connected else 'не подключён'}\n"
+        f"{'🚫' if is_banned else '✓'} Бан: {'да' if is_banned else 'нет'}\n"
+        f"📦 Тариф: {plan}\n"
+        f"📅 Зарегистрирован: {created}\n"
+    )
+    if sub_until:
+        status_lines += f"💳 Подписка до: {sub_until[:10]}\n"
+
+    ban_btn_text = "✅ Разбанить" if is_banned else "🚫 Забанить"
+    ban_cb = f"ow:unban:{target_id}:{back_page}" if is_banned else f"ow:ban:{target_id}:{back_page}"
+
+    await safe_edit(callback,
+        f"👤 <b>{name}</b>\n"
+        f"<code>{target_id}</code>\n\n"
+        f"{status_lines}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=ban_btn_text, callback_data=ban_cb)],
+            [InlineKeyboardButton(text="🗑 Удалить все данные", callback_data=f"ow:delete_confirm:{target_id}:{back_page}")],
+            [InlineKeyboardButton(text="◀️ К списку", callback_data=f"ow:users:{back_page}")],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("ow:ban:"), F.from_user.id == OWNER_ID)
+async def on_ban(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+    await ban_user(target_id)
+    logger.info(f"[OWNER] banned user_id={target_id}")
+    await callback.answer("🚫 Пользователь забанен", show_alert=True)
+    # Обновляем карточку
+    callback.data = f"ow:user:{target_id}:{back_page}"
+    await on_user_detail(callback)
+
+
+@router.callback_query(F.data.startswith("ow:unban:"), F.from_user.id == OWNER_ID)
+async def on_unban(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+    await unban_user(target_id)
+    logger.info(f"[OWNER] unbanned user_id={target_id}")
+    await callback.answer("✅ Пользователь разбанен", show_alert=True)
+    callback.data = f"ow:user:{target_id}:{back_page}"
+    await on_user_detail(callback)
+
+
+@router.callback_query(F.data.startswith("ow:delete_confirm:"), F.from_user.id == OWNER_ID)
+async def on_delete_confirm(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+
+    await safe_edit(callback,
+        f"⚠️ <b>Удалить все данные пользователя <code>{target_id}</code>?</b>\n\n"
+        f"Будут удалены:\n"
+        f"— Профиль и настройки\n"
+        f"— История всех чатов\n"
+        f"— Заметки о контактах\n"
+        f"— Статистика использования\n\n"
+        f"<b>Это действие необратимо.</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 Да, удалить всё", callback_data=f"ow:delete_do:{target_id}:{back_page}")],
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"ow:user:{target_id}:{back_page}")],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("ow:delete_do:"), F.from_user.id == OWNER_ID)
+async def on_delete_do(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+
+    await delete_user_data(target_id)
+    logger.info(f"[OWNER] deleted all data for user_id={target_id}")
+
+    await safe_edit(callback,
+        f"✅ Все данные пользователя <code>{target_id}</code> удалены.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ К списку", callback_data=f"ow:users:{back_page}")]
+        ])
+    )
