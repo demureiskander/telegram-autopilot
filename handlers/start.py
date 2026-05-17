@@ -268,6 +268,22 @@ async def ob_skip_name(callback: CallbackQuery, state: FSMContext):
 
 # ── Шаг город / часовой пояс ─────────────────────────────────────────────────
 
+# Ручной маппинг для городов где timezonefinder даёт неверный результат
+_TIMEZONE_OVERRIDES = {
+    "istanbul": "Europe/Istanbul",
+    "истамбул": "Europe/Istanbul",
+    "стамбул": "Europe/Istanbul",
+    "ankara": "Europe/Istanbul",
+    "анкара": "Europe/Istanbul",
+    "izmir": "Europe/Istanbul",
+    "измир": "Europe/Istanbul",
+    "beijing": "Asia/Shanghai",
+    "пекин": "Asia/Shanghai",
+    "hong kong": "Asia/Hong_Kong",
+    "гонконг": "Asia/Hong_Kong",
+}
+
+
 async def _resolve_timezone(city: str) -> tuple[str | None, str | None]:
     """Определяет часовой пояс по названию города. Возвращает (timezone, city_display)."""
     try:
@@ -276,19 +292,66 @@ async def _resolve_timezone(city: str) -> tuple[str | None, str | None]:
         import asyncio
 
         loop = asyncio.get_event_loop()
-        geolocator = Nominatim(user_agent="raveli_bot")
-
-        location = await loop.run_in_executor(
-            None, lambda: geolocator.geocode(city, language="ru", timeout=10)
-        )
-        if not location:
-            return None, None
-
+        geolocator = Nominatim(user_agent="raveli_bot_tz")
         tf = TimezoneFinder()
-        tz = tf.timezone_at(lng=location.longitude, lat=location.latitude)
-        return tz, location.address.split(",")[0].strip()
+
+        # Пробуем несколько вариантов запроса для точности
+        queries = [city, f"{city} city center", f"city of {city}"]
+
+        for query in queries:
+            location = await loop.run_in_executor(
+                None,
+                lambda q=query: geolocator.geocode(
+                    q,
+                    language="en",
+                    timeout=10,
+                    exactly_one=True,
+                )
+            )
+            if not location:
+                continue
+
+            # Используем timezone_at с fallback на closest_timezone_at
+            tz = tf.timezone_at(lng=location.longitude, lat=location.latitude)
+            if not tz:
+                tz = tf.closest_timezone_at(lng=location.longitude, lat=location.latitude)
+            if tz:
+                # Проверяем ручной маппинг
+                tz_override = _TIMEZONE_OVERRIDES.get(city.lower())
+                if tz_override:
+                    tz = tz_override
+
+                # Получаем красивое название города на русском
+                loc_ru = await loop.run_in_executor(
+                    None,
+                    lambda: geolocator.geocode(city, language="ru", timeout=10, exactly_one=True)
+                )
+                city_display = loc_ru.address.split(",")[0].strip() if loc_ru else location.address.split(",")[0].strip()
+                return tz, city_display
+
+        return None, None
     except Exception:
         return None, None
+
+
+# Популярные города для подсказок при опечатках
+_POPULAR_CITIES = [
+    "Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань",
+    "Нижний Новгород", "Самара", "Омск", "Ростов-на-Дону", "Уфа",
+    "Стамбул", "Анкара", "Баку", "Ташкент", "Алматы", "Бишкек",
+    "Душанбе", "Ашхабад", "Минск", "Киев", "Тбилиси", "Ереван",
+    "Дубай", "Пекин", "Токио", "Лондон", "Берлин", "Париж",
+    "Нью-Йорк", "Лос-Анджелес", "Сингапур", "Бангкок", "Самарканд",
+]
+
+
+def _suggest_city(city_input: str) -> list[str]:
+    """Предлагает похожие города при опечатке."""
+    import difflib
+    matches = difflib.get_close_matches(
+        city_input, _POPULAR_CITIES, n=3, cutoff=0.5
+    )
+    return matches
 
 
 @router.message(OnboardingFSM.step_city)
@@ -299,13 +362,22 @@ async def ob_city(message: Message, state: FSMContext):
     tz, city_display = await _resolve_timezone(city_input)
 
     if not tz:
-        await message.answer(
-            "Не удалось найти такой город 🤔\n\n"
-            "Попробуйте написать иначе — например <b>Moscow</b> вместо <b>Москва</b> "
-            "или укажите страну: <b>Самарканд, Узбекистан</b>\n\n"
-            "Напишите ещё раз:"
-        )
-        return  # остаёмся в том же стейте
+        suggestions = _suggest_city(city_input)
+        if suggestions:
+            suggestion_text = " / ".join(f"<b>{s}</b>" for s in suggestions)
+            await message.answer(
+                f"Не удалось найти город «{city_input}» 🤔\n\n"
+                f"Возможно, вы имели в виду: {suggestion_text}?\n\n"
+                f"Напишите название ещё раз:"
+            )
+        else:
+            await message.answer(
+                f"Не удалось найти город «{city_input}» 🤔\n\n"
+                "Попробуйте написать иначе — например <b>Istanbul</b> вместо <b>Стамбул</b>, "
+                "или укажите страну: <b>Самарканд, Узбекистан</b>\n\n"
+                "Напишите ещё раз:"
+            )
+        return
 
     await set_user_timezone(message.from_user.id, tz)
     await state.update_data(city=city_display, timezone=tz)
