@@ -15,22 +15,33 @@ from logger import logger
 router = Router()
 
 
+_notified_connections: set = set()
+
+
 @router.business_connection()
 async def on_business_connection(event: BusinessConnection, bot: Bot):
+    user_id = event.user.id
     if event.is_enabled:
-        logger.info(f"[CONNECT] user_id={event.user.id} connected profile")
-        await set_connected(event.user.id, True)
-        await log_event('connect_profile', event.user.id)
+        # Дедупликация — не спамим уведомлениями при множественных событиях
+        if user_id in _notified_connections:
+            await set_connected(user_id, True)
+            return
+        _notified_connections.add(user_id)
+
+        logger.info(f"[CONNECT] user_id={user_id} connected profile")
+        await set_connected(user_id, True)
+        await log_event('connect_profile', user_id)
         await bot.send_message(
-            event.user.id,
+            user_id,
             "✅ Бот подключён к профилю. Можешь вернуться к настройке.",
         )
     else:
-        logger.info(f"[DISCONNECT] user_id={event.user.id} disconnected profile")
-        await set_connected(event.user.id, False)
-        await log_event('disconnect_profile', event.user.id)
+        _notified_connections.discard(user_id)
+        logger.info(f"[DISCONNECT] user_id={user_id} disconnected profile")
+        await set_connected(user_id, False)
+        await log_event('disconnect_profile', user_id)
         await bot.send_message(
-            event.user.id,
+            user_id,
             "❌ Бот отключён от профиля."
         )
 

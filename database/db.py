@@ -107,6 +107,17 @@ async def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Миграции — добавляем колонки если не существуют
+        for migration in [
+            "ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'",
+            "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN is_connected INTEGER DEFAULT 0",
+        ]:
+            try:
+                await db.execute(migration)
+            except Exception:
+                pass
+
         await db.commit()
 
 
