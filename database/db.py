@@ -128,6 +128,7 @@ async def init_db() -> None:
             "ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'",
             "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN is_connected INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN business_connection_id TEXT DEFAULT ''",
             "ALTER TABLE contact_notes ADD COLUMN user_note TEXT DEFAULT ''",
             "ALTER TABLE contact_notes ADD COLUMN ai_note TEXT DEFAULT ''",
             "ALTER TABLE contact_notes ADD COLUMN note TEXT DEFAULT ''",
@@ -782,3 +783,12 @@ async def cancel_scheduled(msg_id: int, owner_id: int) -> bool:
         """, (msg_id, owner_id))
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def save_business_connection_id(user_id: int, connection_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET business_connection_id = ? WHERE user_id = ?",
+            (connection_id, user_id)
+        )
+        await db.commit()

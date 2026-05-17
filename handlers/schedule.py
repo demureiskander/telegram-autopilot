@@ -251,12 +251,16 @@ async def on_schedule_confirm(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
 
+    # Берём business_connection_id из профиля пользователя
+    user = await get_user(user_id)
+    biz_conn_id = user.get("business_connection_id", "") if user else ""
+
     msg_id = await add_scheduled_message(
         owner_id=user_id,
         chat_id=data["chat_id"],
         text=data["text"],
         send_at_utc=data["send_at_utc"],
-        business_connection_id="",
+        business_connection_id=biz_conn_id,
     )
 
     await state.clear()

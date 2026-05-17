@@ -7,7 +7,7 @@ from database.db import (
     get_user, is_access_allowed, check_daily_limit,
     increment_daily_usage, get_history, save_message,
     upsert_chat, get_note, set_note, set_connected, get_chat_messages,
-    log_event,
+    log_event, save_business_connection_id,
 )
 from services.llm import ask_llm, extract_contact_info
 from logger import logger
@@ -104,6 +104,10 @@ async def handle_business_message(message: Message, bot: Bot):
         sender_username = f"@{message.from_user.username}" if message.from_user.username else "нет username"
 
     logger.info(f"[MSG] owner_id={owner_id} chat_id={chat_id} from='{sender_name}'")
+
+    # Сохраняем business_connection_id для планировщика
+    if message.business_connection_id:
+        await save_business_connection_id(owner_id, message.business_connection_id)
 
     await upsert_chat(owner_id, chat_id, sender_name or str(chat_id))
     await save_message(owner_id, chat_id, "user", message.text)
