@@ -204,17 +204,28 @@ async def on_manual_input(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(ScheduleFSM.waiting_manual)
-async def on_manual_recipient(message: Message, state: FSMContext):
+async def on_manual_recipient(message: Message, state: FSMContext, bot):
     text = message.text.strip()
 
-    # Определяем chat_id и имя
     if text.startswith("@"):
-        # Username — сохраняем как есть, Telegram сам разрешит
-        chat_id_or_username = text
-        chat_name = text
+        # Резолвим username в числовой chat_id через Telegram API
+        await message.answer("⏳ Проверяю получателя...")
+        try:
+            chat = await bot.get_chat(text)
+            chat_id = chat.id
+            chat_name = chat.full_name or text
+            logger.info(f"[SCHEDULER] resolved {text} → chat_id={chat_id} name='{chat_name}'")
+        except Exception as e:
+            logger.warning(f"[SCHEDULER] failed to resolve username {text}: {e}")
+            await message.answer(
+                f"❌ Не удалось найти пользователя <code>{text}</code>\n\n"
+                "Убедитесь что username написан правильно, или введите числовой ID:\n"
+                "<i>Получить ID можно через @userinfobot</i>\n\n"
+                "Попробуйте ещё раз:"
+            )
+            return
     elif text.lstrip("-").isdigit():
-        # Числовой ID
-        chat_id_or_username = int(text)
+        chat_id = int(text)
         chat_name = f"ID {text}"
     else:
         await message.answer(
@@ -223,11 +234,11 @@ async def on_manual_recipient(message: Message, state: FSMContext):
         )
         return
 
-    await state.update_data(chat_id=chat_id_or_username, chat_name=chat_name)
+    await state.update_data(chat_id=chat_id, chat_name=chat_name)
     await state.set_state(ScheduleFSM.waiting_time)
 
     await message.answer(
-        f"✅ Получатель: <b>{chat_name}</b>\n\n"
+        f"✅ Получатель: <b>{chat_name}</b> (<code>{chat_id}</code>)\n\n"
         "🕐 <b>Когда отправить?</b>\n\n"
         "Напишите время в любом удобном формате:\n\n"
         "<i>— завтра в 19:00\n"
