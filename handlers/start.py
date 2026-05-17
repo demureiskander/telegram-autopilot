@@ -13,7 +13,7 @@ from logger import logger
 from database.db import (
     get_user, update_user_setting,
     get_trial_days_left, get_subscription_days_left,
-    is_connected, log_event, TRIAL_DAYS,
+    is_connected, log_event, set_user_timezone, TRIAL_DAYS,
 )
 
 router = Router()
@@ -23,6 +23,7 @@ class OnboardingFSM(StatesGroup):
     step_use_case = State()
     step_connect  = State()
     step_name     = State()
+    step_city     = State()
     step_job      = State()
     step_style    = State()
     step_spam     = State()
@@ -246,11 +247,11 @@ async def ob_skip_connect(callback: CallbackQuery, state: FSMContext):
 async def ob_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await message.answer(
-        "Чем занимаешься? Пара слов — чтобы ассистент отвечал в правильном контексте.\n\n"
-        "<i>Например: дизайнер-фрилансер / студент / менеджер по продажам</i>",
-        reply_markup=kb_skip()
+        "Из какого вы города?\n\n"
+        "<i>Напишите название на русском или английском — это нужно чтобы ассистент "
+        "знал ваш часовой пояс и мог корректно работать с планировщиком сообщений.</i>"
     )
-    await state.set_state(OnboardingFSM.step_job)
+    await state.set_state(OnboardingFSM.step_city)
 
 
 @router.callback_query(F.data == "ob:skip_step", OnboardingFSM.step_name)
@@ -258,7 +259,61 @@ async def ob_skip_name(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.update_data(name="пользователь")
     await safe_edit(callback,
-        "Чем занимаешься? Пара слов — чтобы ассистент отвечал в правильном контексте.\n\n"
+        "Из какого вы города?\n\n"
+        "<i>Напишите название на русском или английском — это нужно чтобы ассистент "
+        "знал ваш часовой пояс и мог корректно работать с планировщиком сообщений.</i>"
+    )
+    await state.set_state(OnboardingFSM.step_city)
+
+
+# ── Шаг город / часовой пояс ─────────────────────────────────────────────────
+
+async def _resolve_timezone(city: str) -> tuple[str | None, str | None]:
+    """Определяет часовой пояс по названию города. Возвращает (timezone, city_display)."""
+    try:
+        from geopy.geocoders import Nominatim
+        from timezonefinder import TimezoneFinder
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        geolocator = Nominatim(user_agent="raveli_bot")
+
+        location = await loop.run_in_executor(
+            None, lambda: geolocator.geocode(city, language="ru", timeout=10)
+        )
+        if not location:
+            return None, None
+
+        tf = TimezoneFinder()
+        tz = tf.timezone_at(lng=location.longitude, lat=location.latitude)
+        return tz, location.address.split(",")[0].strip()
+    except Exception:
+        return None, None
+
+
+@router.message(OnboardingFSM.step_city)
+async def ob_city(message: Message, state: FSMContext):
+    city_input = message.text.strip()
+    await message.answer("Определяю часовой пояс...")
+
+    tz, city_display = await _resolve_timezone(city_input)
+
+    if not tz:
+        await message.answer(
+            "Не удалось найти такой город 🤔\n\n"
+            "Попробуйте написать иначе — например <b>Moscow</b> вместо <b>Москва</b> "
+            "или укажите страну: <b>Самарканд, Узбекистан</b>\n\n"
+            "Напишите ещё раз:"
+        )
+        return  # остаёмся в том же стейте
+
+    await set_user_timezone(message.from_user.id, tz)
+    await state.update_data(city=city_display, timezone=tz)
+
+    await message.answer(
+        f"✅ Часовой пояс определён: <b>{tz}</b>\n"
+        f"Город: <b>{city_display}</b>\n\n"
+        "Чем занимаетесь? Пара слов — чтобы ассистент отвечал в правильном контексте.\n\n"
         "<i>Например: дизайнер-фрилансер / студент / менеджер по продажам</i>",
         reply_markup=kb_skip()
     )

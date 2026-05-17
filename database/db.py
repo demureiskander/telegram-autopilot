@@ -42,6 +42,7 @@ async def init_db() -> None:
                 is_enabled         INTEGER DEFAULT 0,
                 is_connected       INTEGER DEFAULT 0,
                 is_banned          INTEGER DEFAULT 0,
+                timezone           TEXT DEFAULT 'UTC',
                 active_model       TEXT DEFAULT 'deepseek-v4-flash',
                 system_prompt      TEXT,
                 created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -667,3 +668,12 @@ async def clean_old_events(days: int = 90) -> int:
         )
         await db.commit()
     return count
+
+
+async def set_user_timezone(user_id: int, timezone: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET timezone = ? WHERE user_id = ?",
+            (timezone, user_id)
+        )
+        await db.commit()
