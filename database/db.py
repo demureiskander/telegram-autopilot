@@ -41,6 +41,7 @@ async def init_db() -> None:
                 plan               TEXT DEFAULT 'personal',
                 is_enabled         INTEGER DEFAULT 0,
                 is_connected       INTEGER DEFAULT 0,
+                is_banned          INTEGER DEFAULT 0,
                 active_model       TEXT DEFAULT 'deepseek-v4-flash',
                 system_prompt      TEXT,
                 created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -82,6 +83,27 @@ async def init_db() -> None:
                 date     TEXT    NOT NULL,
                 count    INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, date)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                user_id    INTEGER,
+                meta       TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                plan       TEXT NOT NULL,
+                period     TEXT NOT NULL,
+                stars      INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await db.commit()
@@ -410,3 +432,238 @@ async def set_connected(user_id: int, connected: bool) -> None:
 async def is_connected(user_id: int) -> bool:
     user = await get_user(user_id)
     return bool(user and user.get("is_connected"))
+
+
+# ── Events / Аналитика ────────────────────────────────────────────────────────
+
+async def log_event(event_type: str, user_id: int | None = None, meta: str = "") -> None:
+    """Логируем действие без контента сообщений."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO events (event_type, user_id, meta) VALUES (?, ?, ?)",
+                (event_type, user_id, meta)
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+
+async def log_payment(user_id: int, plan: str, period: str, stars: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO payments (user_id, plan, period, stars) VALUES (?, ?, ?, ?)",
+            (user_id, plan, period, stars)
+        )
+        await db.commit()
+
+
+async def get_owner_stats() -> dict:
+    """Полная статистика для владельца."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Пользователи
+        async with db.execute("SELECT COUNT(*) FROM users") as c:
+            total_users = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE subscription_until > datetime('now')"
+        ) as c:
+            paid_users = (await c.fetchone())[0]
+        async with db.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE trial_started_at >= datetime('now', '-16 days')
+            AND (subscription_until IS NULL OR subscription_until <= datetime('now'))
+        """) as c:
+            trial_users = (await c.fetchone())[0]
+        async with db.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE (subscription_until IS NULL OR subscription_until <= datetime('now'))
+            AND trial_started_at < datetime('now', '-16 days')
+        """) as c:
+            expired_users = (await c.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users WHERE is_connected=1") as c:
+            connected_users = (await c.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users WHERE is_enabled=1") as c:
+            active_users = (await c.fetchone())[0]
+
+        # Онбординг воронка
+        async with db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='onboard_start'"
+        ) as c:
+            onboard_started = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='onboard_complete'"
+        ) as c:
+            onboard_done = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='connect_profile'"
+        ) as c:
+            connected_ever = (await c.fetchone())[0]
+
+        # DAU/WAU/MAU — по событиям
+        async with db.execute("""
+            SELECT COUNT(DISTINCT user_id) FROM events
+            WHERE DATE(created_at) = DATE('now') AND user_id IS NOT NULL
+        """) as c:
+            dau = (await c.fetchone())[0]
+        async with db.execute("""
+            SELECT COUNT(DISTINCT user_id) FROM events
+            WHERE created_at >= datetime('now', '-7 days') AND user_id IS NOT NULL
+        """) as c:
+            wau = (await c.fetchone())[0]
+        async with db.execute("""
+            SELECT COUNT(DISTINCT user_id) FROM events
+            WHERE created_at >= datetime('now', '-30 days') AND user_id IS NOT NULL
+        """) as c:
+            mau = (await c.fetchone())[0]
+
+        # Прирост
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE('now')"
+        ) as c:
+            new_today = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE created_at >= datetime('now', '-7 days')"
+        ) as c:
+            new_week = (await c.fetchone())[0]
+
+        # Сообщения
+        async with db.execute("SELECT COUNT(*) FROM events WHERE event_type='message_handled'") as c:
+            total_messages = (await c.fetchone())[0]
+        async with db.execute("""
+            SELECT COUNT(*) FROM events
+            WHERE event_type='message_handled' AND DATE(created_at) = DATE('now')
+        """) as c:
+            messages_today = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='llm_error'"
+        ) as c:
+            llm_errors = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='llm_fallback'"
+        ) as c:
+            llm_fallbacks = (await c.fetchone())[0]
+
+        # Финансы
+        async with db.execute("SELECT COALESCE(SUM(stars), 0) FROM payments") as c:
+            total_stars = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COALESCE(SUM(stars), 0) FROM payments WHERE DATE(created_at) = DATE('now')"
+        ) as c:
+            stars_today = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COALESCE(SUM(stars), 0) FROM payments WHERE created_at >= datetime('now', '-30 days')"
+        ) as c:
+            stars_month = (await c.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM payments") as c:
+            total_payments = (await c.fetchone())[0]
+
+        # По планам
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE plan='personal' AND subscription_until > datetime('now')"
+        ) as c:
+            personal_paid = (await c.fetchone())[0]
+        async with db.execute(
+            "SELECT COUNT(*) FROM users WHERE plan='business' AND subscription_until > datetime('now')"
+        ) as c:
+            business_paid = (await c.fetchone())[0]
+
+        # Активность по моделям
+        async with db.execute("""
+            SELECT meta, COUNT(*) as cnt FROM events
+            WHERE event_type='message_handled' AND meta != ''
+            GROUP BY meta ORDER BY cnt DESC LIMIT 5
+        """) as c:
+            model_stats = await c.fetchall()
+
+        # Динамика за 7 дней
+        async with db.execute("""
+            SELECT DATE(created_at) as d, COUNT(*) as cnt
+            FROM events WHERE event_type='message_handled'
+            AND created_at >= datetime('now', '-7 days')
+            GROUP BY d ORDER BY d
+        """) as c:
+            daily_msgs = await c.fetchall()
+
+    def pct(n, total):
+        if not total:
+            return "—"
+        return f"{round(n / total * 100)}%"
+
+    return {
+        "total_users": total_users,
+        "paid_users": paid_users,
+        "trial_users": trial_users,
+        "expired_users": expired_users,
+        "connected_users": connected_users,
+        "active_users": active_users,
+        "onboard_started": onboard_started,
+        "onboard_done": onboard_done,
+        "connected_ever": connected_ever,
+        "onboard_conv": pct(onboard_done, onboard_started),
+        "connect_conv": pct(connected_ever, onboard_started),
+        "dau": dau, "wau": wau, "mau": mau,
+        "new_today": new_today, "new_week": new_week,
+        "total_messages": total_messages,
+        "messages_today": messages_today,
+        "llm_errors": llm_errors,
+        "llm_fallbacks": llm_fallbacks,
+        "total_stars": total_stars,
+        "stars_today": stars_today,
+        "stars_month": stars_month,
+        "total_payments": total_payments,
+        "personal_paid": personal_paid,
+        "business_paid": business_paid,
+        "model_stats": model_stats,
+        "daily_msgs": daily_msgs,
+        "pct_fn": pct,
+    }
+
+
+async def get_users_list(limit: int = 20, offset: int = 0) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT user_id, username, first_name, plan, is_enabled, is_connected,
+                   trial_started_at, subscription_until, created_at
+            FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?
+        """, (limit, offset)) as c:
+            return await c.fetchall()
+
+
+async def ban_user(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+
+
+async def unban_user(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+
+
+async def delete_user_data(user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM chats WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM contact_notes WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM daily_usage WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM events WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def clean_old_events(days: int = 90) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT COUNT(*) FROM events WHERE created_at < datetime('now', '-{days} days')"
+        ) as c:
+            count = (await c.fetchone())[0]
+        await db.execute(
+            f"DELETE FROM events WHERE created_at < datetime('now', '-{days} days')"
+        )
+        await db.commit()
+    return count

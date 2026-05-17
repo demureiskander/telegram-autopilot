@@ -13,7 +13,7 @@ from logger import logger
 from database.db import (
     get_user, update_user_setting,
     get_trial_days_left, get_subscription_days_left,
-    is_connected, TRIAL_DAYS,
+    is_connected, log_event, TRIAL_DAYS,
 )
 
 router = Router()
@@ -162,6 +162,7 @@ async def cmd_start(message: Message, state: FSMContext):
         reply_markup=kb_use_case()
     )
     logger.info(f'[ONBOARD] user_id={message.from_user.id} started onboarding')
+    await log_event('onboard_start', message.from_user.id)
     await state.set_state(OnboardingFSM.step_use_case)
 
 
@@ -388,6 +389,7 @@ async def ob_confirm(callback: CallbackQuery, state: FSMContext):
     await update_user_setting(user_id, "system_prompt", prompt)
     await state.clear()
     logger.info(f'[ONBOARD] user_id={user_id} onboarding complete, prompt saved ({len(prompt)} chars)')
+    await log_event('onboard_complete', user_id)
 
     trial_days = await get_trial_days_left(user_id)
 

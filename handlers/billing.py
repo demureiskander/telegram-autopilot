@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from logger import logger
 from database.db import (
     get_user, extend_subscription, get_subscription_days_left,
-    get_trial_days_left, PRICES, PERIOD_LABELS, TRIAL_DAYS,
+    get_trial_days_left, log_payment, log_event, PRICES, PERIOD_LABELS, TRIAL_DAYS,
 )
 
 router = Router()
@@ -122,6 +122,8 @@ async def on_successful_payment(message: Message):
     user_id = message.from_user.id
 
     await extend_subscription(user_id, period, plan)
+    await log_payment(user_id, plan, period, message.successful_payment.total_amount)
+    await log_event('payment_success', user_id, meta=f'{plan}:{period}')
     logger.info(f'[BILLING] user_id={user_id} payment success plan={plan} period={period} stars={message.successful_payment.total_amount}')
 
     plan_name = "Personal" if plan == "personal" else "Business"

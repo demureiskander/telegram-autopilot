@@ -7,6 +7,7 @@ from database.db import (
     get_user, is_access_allowed, check_daily_limit,
     increment_daily_usage, get_history, save_message,
     upsert_chat, get_note, set_note, set_connected, get_chat_messages,
+    log_event,
 )
 from services.llm import ask_llm, extract_contact_info
 from logger import logger
@@ -19,6 +20,7 @@ async def on_business_connection(event: BusinessConnection, bot: Bot):
     if event.is_enabled:
         logger.info(f"[CONNECT] user_id={event.user.id} connected profile")
         await set_connected(event.user.id, True)
+        await log_event('connect_profile', event.user.id)
         await bot.send_message(
             event.user.id,
             "✅ Бот подключён к профилю. Можешь вернуться к настройке.",
@@ -26,6 +28,7 @@ async def on_business_connection(event: BusinessConnection, bot: Bot):
     else:
         logger.info(f"[DISCONNECT] user_id={event.user.id} disconnected profile")
         await set_connected(event.user.id, False)
+        await log_event('disconnect_profile', event.user.id)
         await bot.send_message(
             event.user.id,
             "❌ Бот отключён от профиля."
@@ -89,7 +92,7 @@ async def handle_business_message(message: Message, bot: Bot):
         sender_name = " ".join(parts).strip()
         sender_username = f"@{message.from_user.username}" if message.from_user.username else "нет username"
 
-    logger.info(f"[MSG] owner_id={owner_id} chat_id={chat_id} from='{sender_name}' text='{message.text[:50]}'")
+    logger.info(f"[MSG] owner_id={owner_id} chat_id={chat_id} from='{sender_name}'")
 
     await upsert_chat(owner_id, chat_id, sender_name or str(chat_id))
     await save_message(owner_id, chat_id, "user", message.text)
@@ -155,9 +158,11 @@ async def handle_business_message(message: Message, bot: Bot):
 
     try:
         reply = await ask_llm(system_prompt, history, message.text, active_model=active_model)
-        logger.info(f"[LLM] owner_id={owner_id} model={active_model} reply='{reply[:60]}'")
+        logger.info(f"[LLM] owner_id={owner_id} model={active_model} ok")
+        await log_event('message_handled', owner_id, meta=active_model)
     except Exception as e:
         logger.error(f"[LLM] owner_id={owner_id} error: {e}", exc_info=True)
+        await log_event('llm_error', owner_id)
         await bot.send_message(owner_id, f"⚠️ Ошибка при генерации ответа:\n{e}")
         return
 

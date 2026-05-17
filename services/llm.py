@@ -52,6 +52,8 @@ async def ask_llm(
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        if model != models[0]:
+                            logger.warning(f"[LLM] fallback used: {model}")
                         return data["choices"][0]["message"]["content"]
                     if resp.status in (429, 503, 502, 500):
                         last_error = f"{model}: HTTP {resp.status}"
