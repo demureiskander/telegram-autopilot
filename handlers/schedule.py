@@ -218,10 +218,16 @@ async def on_manual_recipient(message: Message, state: FSMContext, bot):
         except Exception as e:
             logger.warning(f"[SCHEDULER] failed to resolve username {text}: {e}")
             await message.answer(
-                f"❌ Не удалось найти пользователя <code>{text}</code>\n\n"
-                "Убедитесь что username написан правильно, или введите числовой ID:\n"
-                "<i>Получить ID можно через @userinfobot</i>\n\n"
-                "Попробуйте ещё раз:"
+                f"❌ Не удалось найти <code>{text}</code>\n\n"
+                "<b>Почему так происходит:</b> Telegram не позволяет ботам искать "
+                "пользователей по username если они ещё не писали через этого бота.\n\n"
+                "<b>Как решить:</b>\n"
+                "1. Попросите получателя написать вам хотя бы одно сообщение — "
+                "тогда он появится в списке чатов\n"
+                "2. Или узнайте его числовой ID через "
+                "<a href=\"https://t.me/userinfobot\">@userinfobot</a> "
+                "и введите цифрами\n\n"
+                "Введите ID или попробуйте снова:"
             )
             return
     elif text.lstrip("-").isdigit():
