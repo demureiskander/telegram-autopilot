@@ -4,3 +4,5 @@ aiohttp==3.9.5
 python-dotenv==1.0.1
 geopy==2.4.1
 timezonefinder==8.2.4
+apscheduler==3.11.2
+pytz

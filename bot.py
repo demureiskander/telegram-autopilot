@@ -6,9 +6,10 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN, DB_PATH
+from services.scheduler import start_scheduler, stop_scheduler
 from database.db import init_db
 from middlewares.access import AccessMiddleware
-from handlers import start, admin, billing, business, owner
+from handlers import start, admin, billing, business, owner, schedule
 from logger import logger
 
 
@@ -33,6 +34,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(billing.router)
     dp.include_router(admin.router)
+    dp.include_router(schedule.router)
     dp.include_router(business.router)
 
     try:
@@ -42,6 +44,7 @@ async def main():
         logger.critical(f"Failed to initialize database: {e}", exc_info=True)
         return
 
+    start_scheduler(bot)
     logger.info("Bot is running. Press Ctrl+C to stop.")
 
     try:
@@ -60,6 +63,7 @@ async def main():
     except Exception as e:
         logger.critical(f"Fatal error: {e}", exc_info=True)
     finally:
+        stop_scheduler()
         await bot.session.close()
         logger.info("Bot stopped.")
 

@@ -107,6 +107,22 @@ async def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id              INTEGER NOT NULL,
+                chat_id               INTEGER NOT NULL,
+                text                  TEXT NOT NULL,
+                send_at               TIMESTAMP NOT NULL,
+                business_connection_id TEXT,
+                status                TEXT DEFAULT 'pending',
+                created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scheduled_send_at ON scheduled_messages(send_at, status)"
+        )
+
         # Миграции — добавляем колонки если не существуют
         for migration in [
             "ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'",
@@ -688,3 +704,78 @@ async def set_user_timezone(user_id: int, timezone: str) -> None:
             (timezone, user_id)
         )
         await db.commit()
+
+
+# ── Планировщик сообщений ─────────────────────────────────────────────────────
+
+async def add_scheduled_message(
+    owner_id: int,
+    chat_id: int,
+    text: str,
+    send_at_utc: str,
+    business_connection_id: str = "",
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            INSERT INTO scheduled_messages
+            (owner_id, chat_id, text, send_at, business_connection_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, (owner_id, chat_id, text, send_at_utc, business_connection_id))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_pending_scheduled(limit: int = 50) -> list:
+    """Возвращает сообщения готовые к отправке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT id, owner_id, chat_id, text, business_connection_id
+            FROM scheduled_messages
+            WHERE status = 'pending'
+            AND send_at <= datetime('now')
+            ORDER BY send_at ASC
+            LIMIT ?
+        """, (limit,)) as c:
+            return await c.fetchall()
+
+
+async def mark_scheduled_sent(msg_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_messages SET status = 'sent' WHERE id = ?",
+            (msg_id,)
+        )
+        await db.commit()
+
+
+async def mark_scheduled_failed(msg_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_messages SET status = 'failed' WHERE id = ?",
+            (msg_id,)
+        )
+        await db.commit()
+
+
+async def get_user_scheduled(owner_id: int, limit: int = 10) -> list:
+    """Список запланированных сообщений пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT id, chat_id, text, send_at, status
+            FROM scheduled_messages
+            WHERE owner_id = ? AND status = 'pending'
+            ORDER BY send_at ASC
+            LIMIT ?
+        """, (owner_id, limit)) as c:
+            return await c.fetchall()
+
+
+async def cancel_scheduled(msg_id: int, owner_id: int) -> bool:
+    """Отменяет запланированное сообщение. Возвращает True если удалось."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            UPDATE scheduled_messages SET status = 'cancelled'
+            WHERE id = ? AND owner_id = ? AND status = 'pending'
+        """, (msg_id, owner_id))
+        await db.commit()
+        return cursor.rowcount > 0

@@ -54,6 +54,9 @@ def kb_main(enabled: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🗑 История",    callback_data="adm:clear_menu"),
             InlineKeyboardButton(text="💳 Подписка",   callback_data="billing:menu"),
         ],
+        [
+            InlineKeyboardButton(text="📅 Планировщик", callback_data="adm:schedule"),
+        ],
     ])
 
 
