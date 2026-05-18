@@ -542,9 +542,20 @@ async def on_grant_do(callback: CallbackQuery):
     from config import DB_PATH
 
     if period == "forever":
-        # 10 лет
+        # 10 лет поверх текущей подписки
+        from database.db import get_user
+        user = await get_user(target_id)
+        now = datetime.utcnow()
+        if user and user.get("subscription_until"):
+            try:
+                current = datetime.fromisoformat(user["subscription_until"])
+                base = max(current, now)
+            except Exception:
+                base = now
+        else:
+            base = now
+        forever = (base + timedelta(days=3650)).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
-            forever = (datetime.utcnow() + timedelta(days=3650)).isoformat()
             await db.execute(
                 "UPDATE users SET subscription_until = ?, plan = ? WHERE user_id = ?",
                 (forever, plan, target_id)
