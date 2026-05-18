@@ -15,7 +15,7 @@ from database.db import (
     get_note, get_notes, set_user_note, delete_user_note, delete_note,
     clear_history, clear_all_history,
     get_trial_days_left, get_subscription_days_left,
-    check_daily_limit, TRIAL_DAYS,
+    check_daily_limit, get_today_messages, TRIAL_DAYS,
 )
 from services.llm import AVAILABLE_MODELS
 
@@ -281,6 +281,7 @@ async def on_chat_detail(callback: CallbackQuery):
 
     user_note_btn = "✏️ Изменить вашу заметку" if user_note else "📝 Добавить заметку"
     buttons = [
+        [InlineKeyboardButton(text="📋 Сводка за сегодня", callback_data=f"adm:summary:{chat_id}:{page}")],
         [InlineKeyboardButton(text=user_note_btn, callback_data=f"adm:note_edit:{chat_id}:{page}")],
     ]
     if user_note:
@@ -571,3 +572,57 @@ async def on_check_connect(callback: CallbackQuery):
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:menu")],
             ])
         )
+
+
+# ── Сводка диалога ────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm:summary:"))
+async def on_summary(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    page = int(parts[3]) if len(parts) > 3 else 0
+    user_id = callback.from_user.id
+
+    from database.db import get_today_messages, get_chat_list
+    from services.llm import generate_summary
+
+    # Получаем имя контакта
+    chats = await get_chat_list(user_id, limit=100)
+    contact_name = str(chat_id)
+    for row in chats:
+        if row[0] == chat_id:
+            contact_name = row[1] or str(chat_id)
+            break
+
+    messages = await get_today_messages(user_id, chat_id)
+
+    if not messages:
+        await callback.answer("Сегодня сообщений не было", show_alert=True)
+        return
+
+    # Показываем индикатор загрузки
+    await safe_edit(callback,
+        f"📋 <b>Генерирую сводку...</b>\n\n"
+        f"Анализирую {len(messages)} сообщений за сегодня.",
+        reply_markup=None
+    )
+
+    summary = await generate_summary(messages, contact_name)
+
+    if not summary:
+        await safe_edit(callback,
+            "⚠️ Не удалось сгенерировать сводку. Попробуйте позже.",
+            reply_markup=kb_back(f"adm:chat:{chat_id}:{page}")
+        )
+        return
+
+    from datetime import datetime
+    today = datetime.now().strftime("%d.%m.%Y")
+
+    await safe_edit(callback,
+        f"📋 <b>Сводка диалога с {contact_name}</b>\n"
+        f"<i>{today} · {len(messages)} сообщений</i>\n\n"
+        f"{summary}",
+        reply_markup=kb_back(f"adm:chat:{chat_id}:{page}")
+    )

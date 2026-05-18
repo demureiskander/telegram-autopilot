@@ -395,11 +395,15 @@ async def on_user_detail(callback: CallbackQuery):
     ban_btn_text = "✅ Разбанить" if is_banned else "🚫 Забанить"
     ban_cb = f"ow:unban:{target_id}:{back_page}" if is_banned else f"ow:ban:{target_id}:{back_page}"
 
+    has_sub = bool(sub_until and sub_until > datetime.utcnow().isoformat()[:19])
+
     await safe_edit(callback,
         f"👤 <b>{name}</b>\n"
         f"<code>{target_id}</code>\n\n"
         f"{status_lines}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Выдать премиум", callback_data=f"ow:grant:{target_id}:{back_page}")],
+            [InlineKeyboardButton(text="❌ Отозвать подписку", callback_data=f"ow:revoke:{target_id}:{back_page}")] if has_sub else [],
             [InlineKeyboardButton(text=ban_btn_text, callback_data=ban_cb)],
             [InlineKeyboardButton(text="🗑 Удалить все данные", callback_data=f"ow:delete_confirm:{target_id}:{back_page}")],
             [InlineKeyboardButton(text="◀️ К списку", callback_data=f"ow:users:{back_page}")],
@@ -472,3 +476,114 @@ async def on_delete_do(callback: CallbackQuery):
             [InlineKeyboardButton(text="◀️ К списку", callback_data=f"ow:users:{back_page}")]
         ])
     )
+
+
+# ── Ручная выдача / отзыв премиума ───────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("ow:grant:"), F.from_user.id == OWNER_ID)
+async def on_grant_menu(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3] if len(parts) > 3 else "0"
+
+    await safe_edit(callback,
+        f"💳 <b>Выдать премиум</b>\n\n"
+        f"Пользователь: <code>{target_id}</code>\n\n"
+        f"Выберите тариф:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 Personal", callback_data=f"ow:grant_plan:{target_id}:{back_page}:personal"),
+                InlineKeyboardButton(text="🏢 Business", callback_data=f"ow:grant_plan:{target_id}:{back_page}:business"),
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"ow:user:{target_id}:{back_page}")],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("ow:grant_plan:"), F.from_user.id == OWNER_ID)
+async def on_grant_plan(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+    plan = parts[4]
+    plan_name = "Personal" if plan == "personal" else "Business"
+
+    await safe_edit(callback,
+        f"💳 <b>{plan_name}</b> для <code>{target_id}</code>\n\n"
+        f"Выберите срок:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="7 дней",    callback_data=f"ow:grant_do:{target_id}:{back_page}:{plan}:week")],
+            [InlineKeyboardButton(text="1 месяц",   callback_data=f"ow:grant_do:{target_id}:{back_page}:{plan}:month")],
+            [InlineKeyboardButton(text="3 месяца",  callback_data=f"ow:grant_do:{target_id}:{back_page}:{plan}:quarter")],
+            [InlineKeyboardButton(text="1 год",     callback_data=f"ow:grant_do:{target_id}:{back_page}:{plan}:year")],
+            [InlineKeyboardButton(text="♾ Бессрочно (10 лет)", callback_data=f"ow:grant_do:{target_id}:{back_page}:{plan}:forever")],
+            [InlineKeyboardButton(text="◀️ Назад",  callback_data=f"ow:grant:{target_id}:{back_page}")],
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("ow:grant_do:"), F.from_user.id == OWNER_ID)
+async def on_grant_do(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+    plan = parts[4]
+    period = parts[5]
+
+    from database.db import extend_subscription, PERIOD_LABELS
+    from datetime import datetime, timedelta
+    import aiosqlite
+    from config import DB_PATH
+
+    if period == "forever":
+        # 10 лет
+        async with aiosqlite.connect(DB_PATH) as db:
+            forever = (datetime.utcnow() + timedelta(days=3650)).isoformat()
+            await db.execute(
+                "UPDATE users SET subscription_until = ?, plan = ? WHERE user_id = ?",
+                (forever, plan, target_id)
+            )
+            await db.commit()
+        period_label = "бессрочно"
+    else:
+        await extend_subscription(target_id, period, plan)
+        period_label = PERIOD_LABELS.get(period, period)
+
+    plan_name = "Personal" if plan == "personal" else "Business"
+    logger.info(f"[OWNER] granted {plan_name} {period_label} to user_id={target_id}")
+
+    await safe_edit(callback,
+        f"✅ <b>Премиум выдан!</b>\n\n"
+        f"Пользователь: <code>{target_id}</code>\n"
+        f"Тариф: <b>{plan_name}</b>\n"
+        f"Срок: <b>{period_label}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ К пользователю", callback_data=f"ow:user:{target_id}:{back_page}")]
+        ])
+    )
+
+
+@router.callback_query(F.data.startswith("ow:revoke:"), F.from_user.id == OWNER_ID)
+async def on_revoke(callback: CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    target_id = int(parts[2])
+    back_page = parts[3]
+
+    import aiosqlite
+    from config import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET subscription_until = NULL WHERE user_id = ?",
+            (target_id,)
+        )
+        await db.commit()
+
+    logger.info(f"[OWNER] revoked subscription for user_id={target_id}")
+    await callback.answer("✅ Подписка отозвана", show_alert=True)
+
+    callback.data = f"ow:user:{target_id}:{back_page}"
+    await on_user_detail(callback)

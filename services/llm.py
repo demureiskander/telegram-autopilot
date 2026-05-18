@@ -137,3 +137,43 @@ async def extract_contact_info(
                 continue
 
     return None
+
+
+async def generate_summary(messages: list[dict], contact_name: str) -> str | None:
+    """Генерирует ИИ-резюме диалога."""
+    if not messages:
+        return None
+
+    dialog = ""
+    for msg in messages:
+        role = "Собеседник" if msg["role"] == "user" else "Ассистент"
+        dialog += f"{role} ({msg['time']}): {msg['content']}\n"
+
+    prompt = (
+        f"Собеседник: {contact_name}\n\n"
+        f"Диалог за сегодня:\n{dialog}\n\n"
+        "Составь краткое резюме этого диалога — 3-5 предложений.\n"
+        "Укажи: о чём спрашивал собеседник, что ему ответили, к чему пришли.\n"
+        "Пиши от третьего лица, деловым языком.\n"
+        "Не добавляй оценок и лишних слов."
+    )
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                LLM_BASE_URL,
+                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "gemini-2.5-flash-lite",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 300,
+                },
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None

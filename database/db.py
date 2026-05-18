@@ -792,3 +792,16 @@ async def save_business_connection_id(user_id: int, connection_id: str) -> None:
             (connection_id, user_id)
         )
         await db.commit()
+
+
+async def get_today_messages(user_id: int, chat_id: int) -> list[dict]:
+    """Возвращает сообщения за сегодня для сводки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT role, content, created_at FROM messages
+            WHERE user_id = ? AND chat_id = ?
+            AND DATE(created_at) = DATE('now')
+            ORDER BY created_at ASC
+        """, (user_id, chat_id)) as c:
+            rows = await c.fetchall()
+            return [{"role": r[0], "content": r[1], "time": r[2][11:16]} for r in rows]
