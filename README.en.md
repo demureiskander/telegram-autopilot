@@ -1,4 +1,6 @@
-<img width="1915" height="530" alt="Frame 188" src="https://github.com/user-attachments/assets/89fa6d95-d67d-4c65-8b6f-cf490d7b257b" />
+<a href="https://t.me/RavelioBot">
+  <img width="3830" height="1060" alt="RavelioBot — попробовать" src="https://github.com/user-attachments/assets/d6f36dff-1377-4fd1-9529-6cc5fb2524a6" />
+</a>
 
 # 🤖 telegram-autopilot — cloud
 
