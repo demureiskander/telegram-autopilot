@@ -48,7 +48,10 @@ def kb_owner() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👥 Пользователи", callback_data="ow:users:0"),
         ],
         [
+            InlineKeyboardButton(text="📢 Рассылка",     callback_data="ow:broadcast"),
             InlineKeyboardButton(text="🗄 База данных",  callback_data="ow:db"),
+        ],
+        [
             InlineKeyboardButton(text="🧹 Очистка",     callback_data="ow:cleanup"),
         ],
     ])
@@ -587,3 +590,223 @@ async def on_revoke(callback: CallbackQuery):
 
     callback.data = f"ow:user:{target_id}:{back_page}"
     await on_user_detail(callback)
+
+
+# ── Рассылка ─────────────────────────────────────────────────────────────────
+
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+
+class BroadcastFSM(StatesGroup):
+    waiting_segment = State()
+    waiting_ids     = State()
+    waiting_text    = State()
+    confirm         = State()
+
+
+def kb_broadcast_segments() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Всем пользователям",    callback_data="bc:seg:all")],
+        [InlineKeyboardButton(text="👤 Только Personal",       callback_data="bc:seg:personal")],
+        [InlineKeyboardButton(text="🏢 Только Business",       callback_data="bc:seg:business")],
+        [InlineKeyboardButton(text="🎁 Только на триале",      callback_data="bc:seg:trial")],
+        [InlineKeyboardButton(text="✏️ Выборочно (ID/username)", callback_data="bc:seg:manual")],
+        [InlineKeyboardButton(text="◀️ Назад",                 callback_data="ow:menu")],
+    ])
+
+
+@router.callback_query(F.data == "ow:broadcast", F.from_user.id == OWNER_ID)
+async def on_broadcast_menu(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await safe_edit(callback,
+        "📢 <b>Рассылка</b>\n\n"
+        "Кому отправить сообщение?",
+        reply_markup=kb_broadcast_segments()
+    )
+    await state.set_state(BroadcastFSM.waiting_segment)
+
+
+@router.callback_query(F.data.startswith("bc:seg:"), BroadcastFSM.waiting_segment, F.from_user.id == OWNER_ID)
+async def on_broadcast_segment(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    segment = callback.data.split(":")[2]
+    await state.update_data(segment=segment)
+
+    if segment == "manual":
+        await safe_edit(callback,
+            "✏️ <b>Выборочная рассылка</b>\n\n"
+            "Введите ID или username через запятую или с новой строки:\n\n"
+            "<i>Пример:\n123456789\n@username\n987654321</i>\n\n"
+            "Отмена → /owneradmin"
+        )
+        await state.set_state(BroadcastFSM.waiting_ids)
+    else:
+        labels = {
+            "all":      "всем пользователям",
+            "personal": "Personal пользователям",
+            "business": "Business пользователям",
+            "trial":    "пользователям на триале",
+        }
+        await safe_edit(callback,
+            f"📢 Рассылка <b>{labels[segment]}</b>\n\n"
+            "Напишите текст сообщения:\n\n"
+            "<i>Поддерживается HTML-форматирование: <b>жирный</b>, <i>курсив</i>, <code>код</code></i>\n\n"
+            "Отмена → /owneradmin"
+        )
+        await state.set_state(BroadcastFSM.waiting_text)
+
+
+@router.message(BroadcastFSM.waiting_ids, F.from_user.id == OWNER_ID)
+async def on_broadcast_ids(message: Message, state: FSMContext):
+    raw = message.text.strip()
+    ids = []
+    for item in raw.replace(",", "\n").split("\n"):
+        item = item.strip()
+        if not item:
+            continue
+        if item.startswith("@"):
+            ids.append(item)
+        elif item.lstrip("-").isdigit():
+            ids.append(int(item))
+
+    if not ids:
+        await message.answer("❌ Не распознал ни одного ID. Попробуйте ещё раз:")
+        return
+
+    await state.update_data(manual_ids=ids)
+    await message.answer(
+        f"✅ Получателей: <b>{len(ids)}</b>\n\n"
+        "Напишите текст сообщения:\n\n"
+        "<i>Поддерживается HTML-форматирование</i>\n\n"
+        "Отмена → /owneradmin"
+    )
+    await state.set_state(BroadcastFSM.waiting_text)
+
+
+@router.message(BroadcastFSM.waiting_text, F.from_user.id == OWNER_ID)
+async def on_broadcast_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    data = await state.get_data()
+    segment = data.get("segment", "all")
+    manual_ids = data.get("manual_ids", [])
+
+    segment_labels = {
+        "all":      "все пользователи",
+        "personal": "Personal",
+        "business": "Business",
+        "trial":    "на триале",
+        "manual":   f"выборочно ({len(manual_ids)} чел.)",
+    }
+
+    await message.answer(
+        f"📢 <b>Проверьте рассылку:</b>\n\n"
+        f"Сегмент: <b>{segment_labels.get(segment, segment)}</b>\n\n"
+        f"Текст:\n{message.text}\n\n"
+        "Отправить?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отправить", callback_data="bc:send")],
+            [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="bc:edit_text")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="ow:menu")],
+        ])
+    )
+    await state.set_state(BroadcastFSM.confirm)
+
+
+@router.callback_query(F.data == "bc:edit_text", BroadcastFSM.confirm, F.from_user.id == OWNER_ID)
+async def on_broadcast_edit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(BroadcastFSM.waiting_text)
+    await callback.message.answer("✏️ Напишите новый текст сообщения:")
+
+
+@router.callback_query(F.data == "bc:send", BroadcastFSM.confirm, F.from_user.id == OWNER_ID)
+async def on_broadcast_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+    data = await state.get_data()
+    segment = data.get("segment", "all")
+    text = data.get("text", "")
+    manual_ids = data.get("manual_ids", [])
+    await state.clear()
+
+    # Получаем список получателей
+    import aiosqlite
+    from config import DB_PATH
+
+    user_ids = []
+
+    if segment == "manual":
+        for item in manual_ids:
+            if isinstance(item, int):
+                user_ids.append(item)
+            else:
+                # username — пробуем резолвить
+                try:
+                    chat = await bot.get_chat(item)
+                    user_ids.append(chat.id)
+                except Exception:
+                    logger.warning(f"[BROADCAST] failed to resolve {item}")
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if segment == "all":
+                query = "SELECT user_id FROM users"
+                params = ()
+            elif segment == "personal":
+                query = "SELECT user_id FROM users WHERE plan = 'personal' AND subscription_until > datetime('now')"
+                params = ()
+            elif segment == "business":
+                query = "SELECT user_id FROM users WHERE plan = 'business' AND subscription_until > datetime('now')"
+                params = ()
+            elif segment == "trial":
+                query = """SELECT user_id FROM users
+                           WHERE trial_started_at >= datetime('now', '-16 days')
+                           AND (subscription_until IS NULL OR subscription_until <= datetime('now'))"""
+                params = ()
+
+            async with db.execute(query, params) as c:
+                rows = await c.fetchall()
+                user_ids = [r[0] for r in rows]
+
+    if not user_ids:
+        await callback.message.answer("⚠️ Нет пользователей в выбранном сегменте.")
+        return
+
+    # Отправляем
+    status_msg = await callback.message.answer(
+        f"📤 Отправляю... 0/{len(user_ids)}"
+    )
+
+    sent = 0
+    failed = 0
+
+    for i, uid in enumerate(user_ids):
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"[BROADCAST] failed to send to {uid}: {e}")
+
+        # Обновляем прогресс каждые 10 сообщений
+        if (i + 1) % 10 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"📤 Отправляю... {i+1}/{len(user_ids)}"
+                )
+            except Exception:
+                pass
+
+        # Антифлуд — пауза каждые 25 сообщений
+        if (i + 1) % 25 == 0:
+            import asyncio
+            await asyncio.sleep(1)
+
+    logger.info(f"[BROADCAST] done: sent={sent} failed={failed} segment={segment}")
+
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена</b>\n\n"
+        f"✉️ Отправлено: <b>{sent}</b>\n"
+        f"❌ Не доставлено: <b>{failed}</b>",
+        reply_markup=kb_back()
+    )
