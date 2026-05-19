@@ -123,12 +123,22 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_scheduled_send_at ON scheduled_messages(send_at, status)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS offline_notified (
+                user_id    INTEGER NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, chat_id)
+            )
+        """)
+
         # Миграции — добавляем колонки если не существуют
         for migration in [
             "ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'",
             "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN is_connected INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN business_connection_id TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN offline_mode INTEGER DEFAULT 0",
             "ALTER TABLE contact_notes ADD COLUMN user_note TEXT DEFAULT ''",
             "ALTER TABLE contact_notes ADD COLUMN ai_note TEXT DEFAULT ''",
             "ALTER TABLE contact_notes ADD COLUMN note TEXT DEFAULT ''",
@@ -216,7 +226,7 @@ async def extend_subscription(user_id: int, period: str, plan: str) -> None:
 
 
 async def update_user_setting(user_id: int, key: str, value) -> None:
-    allowed = {"is_enabled", "active_model", "system_prompt", "plan"}
+    allowed = {"is_enabled", "active_model", "system_prompt", "plan", "offline_mode", "offline_reply"}
     if key not in allowed:
         return
     async with aiosqlite.connect(DB_PATH) as db:
@@ -805,3 +815,49 @@ async def get_today_messages(user_id: int, chat_id: int) -> list[dict]:
         """, (user_id, chat_id)) as c:
             rows = await c.fetchall()
             return [{"role": r[0], "content": r[1], "time": r[2][11:16]} for r in rows]
+
+
+# ── Офлайн режим ──────────────────────────────────────────────────────────────
+
+async def set_offline_mode(user_id: int, enabled: bool) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET offline_mode = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id)
+        )
+        # При выключении — сбрасываем всех уведомлённых
+        if not enabled:
+            await db.execute(
+                "DELETE FROM offline_notified WHERE user_id = ?",
+                (user_id,)
+            )
+        await db.commit()
+
+
+async def is_offline_notified(user_id: int, chat_id: int) -> bool:
+    """Уже отправляли офлайн-сообщение этому собеседнику?"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM offline_notified WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        ) as c:
+            return await c.fetchone() is not None
+
+
+async def mark_offline_notified(user_id: int, chat_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO offline_notified (user_id, chat_id) VALUES (?, ?)",
+            (user_id, chat_id)
+        )
+        await db.commit()
+
+
+async def clear_offline_notified_chat(user_id: int, chat_id: int) -> None:
+    """Сбрасываем флаг когда владелец сам написал этому человеку."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM offline_notified WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id)
+        )
+        await db.commit()

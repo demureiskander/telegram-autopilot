@@ -54,6 +54,8 @@ async def handle_business_message(message: Message, bot: Bot):
         return
 
     if message.from_user and message.from_user.id == owner_id:
+        # Владелец сам написал — сбрасываем флаг офлайн для этого чата
+        await clear_offline_notified_chat(owner_id, message.chat.id)
         return
 
     if not message.text:
@@ -66,6 +68,25 @@ async def handle_business_message(message: Message, bot: Bot):
 
     if not user["is_enabled"]:
         logger.debug(f"[MSG] owner_id={owner_id} auto-reply is OFF, skipping")
+        return
+
+    # Офлайн режим
+    if user.get("offline_mode"):
+        already_notified = await is_offline_notified(owner_id, chat_id)
+        if not already_notified:
+            offline_text = user.get("offline_reply") or "Привет! Сейчас недоступен, отвечу позже."
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=offline_text,
+                    business_connection_id=message.business_connection_id,
+                )
+                await mark_offline_notified(owner_id, chat_id)
+                logger.info(f"[OFFLINE] owner_id={owner_id} chat_id={chat_id} sent offline reply")
+            except Exception as e:
+                logger.error(f"[OFFLINE] failed: {e}")
+        else:
+            logger.debug(f"[OFFLINE] owner_id={owner_id} chat_id={chat_id} already notified, skipping")
         return
 
     allowed, reason = await is_access_allowed(owner_id)

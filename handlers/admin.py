@@ -15,7 +15,7 @@ from database.db import (
     get_note, get_notes, set_user_note, delete_user_note, delete_note,
     clear_history, clear_all_history,
     get_trial_days_left, get_subscription_days_left,
-    check_daily_limit, get_today_messages, TRIAL_DAYS,
+    check_daily_limit, get_today_messages, set_offline_mode, TRIAL_DAYS,
 )
 from services.llm import AVAILABLE_MODELS
 
@@ -55,7 +55,8 @@ def kb_main(enabled: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="💳 Подписка",   callback_data="billing:menu"),
         ],
         [
-            InlineKeyboardButton(text="📅 Планировщик", callback_data="adm:schedule"),
+            InlineKeyboardButton(text="📅 Планировщик",  callback_data="adm:schedule"),
+            InlineKeyboardButton(text="🌙 Офлайн режим", callback_data="adm:offline"),
         ],
     ])
 
@@ -625,4 +626,79 @@ async def on_summary(callback: CallbackQuery):
         f"<i>{today} · {len(messages)} сообщений</i>\n\n"
         f"{summary}",
         reply_markup=kb_back(f"adm:chat:{chat_id}:{page}")
+    )
+
+
+# ── Офлайн режим ──────────────────────────────────────────────────────────────
+
+class OfflineFSM(StatesGroup):
+    editing_reply = State()
+
+
+@router.callback_query(F.data == "adm:offline")
+async def on_offline_menu(callback: CallbackQuery):
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    offline_on = bool(user.get("offline_mode")) if user else False
+    offline_reply = user.get("offline_reply") or "Привет! Сейчас недоступен, отвечу позже."
+
+    status = "🟢 Включён" if offline_on else "⚫️ Выключен"
+    toggle_text = "⚫️ Выключить" if offline_on else "🌙 Включить"
+
+    await safe_edit(callback,
+        f"🌙 <b>Офлайн режим</b>\n\n"
+        f"Статус: <b>{status}</b>\n\n"
+        f"Когда включён — бот отправляет одно сообщение каждому новому собеседнику "
+        f"и больше не отвечает ему пока вы сами не напишете.\n\n"
+        f"📝 <b>Текст ответа:</b>\n<i>{offline_reply}</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_text, callback_data="adm:offline_toggle")],
+            [InlineKeyboardButton(text="✏️ Изменить текст ответа", callback_data="adm:offline_edit")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:menu")],
+        ])
+    )
+
+
+@router.callback_query(F.data == "adm:offline_toggle")
+async def on_offline_toggle(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    new_val = not bool(user.get("offline_mode")) if user else True
+
+    await set_offline_mode(user_id, new_val)
+    logger.info(f"[ADMIN] user_id={user_id} offline_mode={'ON' if new_val else 'OFF'}")
+
+    status = "🟢 Включён" if new_val else "⚫️ Выключен"
+    msg = "🌙 Офлайн режим включён — буду отвечать каждому один раз." if new_val else "✅ Офлайн режим выключен — работаю в обычном режиме."
+    await callback.answer(msg, show_alert=True)
+
+    # Обновляем меню
+    callback.data = "adm:offline"
+    await on_offline_menu(callback)
+
+
+@router.callback_query(F.data == "adm:offline_edit")
+async def on_offline_edit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    current = user.get("offline_reply") or "Привет! Сейчас недоступен, отвечу позже."
+
+    await state.set_state(OfflineFSM.editing_reply)
+    await callback.message.answer(
+        f"✏️ Напишите текст который будет отправляться в офлайн режиме:\n\n"
+        f"<i>Текущий: {current}</i>\n\n"
+        "Отмена → /admin"
+    )
+
+
+@router.message(OfflineFSM.editing_reply)
+async def on_offline_reply_input(message: Message, state: FSMContext):
+    await state.clear()
+    await update_user_setting(message.from_user.id, "offline_reply", message.text.strip())
+    await message.answer(
+        "✅ Текст офлайн-ответа сохранён.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ К офлайн режиму", callback_data="adm:offline")]
+        ])
     )
