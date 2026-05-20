@@ -8,6 +8,7 @@ from database.db import (
     increment_daily_usage, get_history, save_message,
     upsert_chat, get_note, set_note, set_connected, get_chat_messages,
     log_event, save_business_connection_id,
+    is_offline_notified, mark_offline_notified, clear_offline_notified_chat,
 )
 from services.llm import ask_llm, extract_contact_info
 from logger import logger
