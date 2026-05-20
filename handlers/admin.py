@@ -661,7 +661,6 @@ async def on_offline_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "adm:offline_toggle")
 async def on_offline_toggle(callback: CallbackQuery):
-    await callback.answer()
     user_id = callback.from_user.id
     user = await get_user(user_id)
     new_val = not bool(user.get("offline_mode")) if user else True
@@ -669,11 +668,11 @@ async def on_offline_toggle(callback: CallbackQuery):
     await set_offline_mode(user_id, new_val)
     logger.info(f"[ADMIN] user_id={user_id} offline_mode={'ON' if new_val else 'OFF'}")
 
-    status = "🟢 Включён" if new_val else "⚫️ Выключен"
-    msg = "🌙 Офлайн режим включён — буду отвечать каждому один раз." if new_val else "✅ Офлайн режим выключен — работаю в обычном режиме."
-    await callback.answer(msg, show_alert=True)
+    # Показываем всплывающее уведомление
+    msg = "🌙 Офлайн режим включён" if new_val else "✅ Офлайн режим выключен"
+    await callback.answer(msg, show_alert=False)
 
-    # Обновляем меню
+    # Редактируем то же сообщение с новым статусом
     callback.data = "adm:offline"
     await on_offline_menu(callback)
 
